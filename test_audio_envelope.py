@@ -197,14 +197,28 @@ class TestAudioEnvelope(unittest.TestCase):
         comp.tools["MediaIn1"] = MockFusionTool("MediaIn1", "MediaIn")
         comp.tools["MediaOut1"] = MockFusionTool("MediaOut1", "MediaOut")
         comp.tools["Spline1"] = MockFusionTool("Spline1", "BezierSpline")
+        comp.tools["Left"] = MockFusionTool("Left", "AudioDisplay")
         comp.tools["Blur1"] = MockFusionTool("Blur1", "Blur")
         comp.tools["OFX_Glow1"] = MockFusionTool("OFX_Glow1", "OpenFX")
+        
+        # Test GroupOperator / Fusion Effect template
+        comic = MockFusionTool("ComicBook", "GroupOperator")
+        comp.tools["ComicBook"] = comic
+        
+        # Internal subnode of group should be ignored
+        sub_tool = MockFusionTool("InternalDisplace1", "Displace")
+        sub_tool.SetAttrs({"TOOLH_GroupParent": comic})
+        comp.tools["InternalDisplace1"] = sub_tool
 
         effects = get_clip_effect_tools(comp)
-        self.assertEqual(len(effects), 2)
+        self.assertEqual(len(effects), 3)
         self.assertIn("Blur1 [Blur]", effects)
         self.assertIn("OFX_Glow1 [OpenFX]", effects)
-        self.assertEqual(effects["Blur1 [Blur]"]["name"], "Blur1")
+        self.assertIn("ComicBook [Fusion Effect]", effects)
+        self.assertNotIn("InternalDisplace1 [Displace]", effects)
+        self.assertNotIn("Left [AudioDisplay]", effects)
+        self.assertEqual(effects["ComicBook [Fusion Effect]"]["name"], "ComicBook")
+        self.assertEqual(effects["ComicBook [Fusion Effect]"]["comp"], comp)
 
     def test_get_tool_animatable_inputs(self):
         tool = MockFusionTool("TestEffect1", "CustomPlugin")

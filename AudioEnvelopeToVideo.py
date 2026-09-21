@@ -697,6 +697,7 @@ TARGET_PRESETS["BrightnessContrast: Gain"] = TARGET_PRESETS["BrightnessContrast:
 IGNORED_FUSION_TOOLS = {
     "MediaIn", "MediaOut", "BezierSpline", "XYPath", "Polyline",
     "LookUpTable", "PipeRouter", "Underlay", "Note", "TimeSpeed",
+    "AudioDisplay",
 }
 
 
@@ -705,7 +706,8 @@ def get_clip_effect_tools(comp):
     Returns a dict mapping display_name -> tool_info dict for all effect tools
     present in the clip's Fusion composition:
     {
-        "Blur1 [Blur]": {"name": "Blur1", "reg_id": "Blur", "tool": ToolObject, "display_name": "Blur1 [Blur]"},
+        "Blur1 [Blur]": {"name": "Blur1", "reg_id": "Blur", "tool": ToolObject, "comp": comp, "display_name": "Blur1 [Blur]"},
+        "ComicBook [Fusion Effect]": {"name": "ComicBook", "reg_id": "GroupOperator", "tool": ToolObject, "comp": comp, "display_name": "ComicBook [Fusion Effect]"},
         ...
     }
     """
@@ -729,10 +731,15 @@ def get_clip_effect_tools(comp):
         try:
             name = tool.GetAttrs("TOOLS_Name") or ""
             reg_id = tool.GetAttrs("TOOLS_RegID") or ""
+            parent = tool.GetAttrs("TOOLH_GroupParent")
         except Exception:
             continue
 
         if not name:
+            continue
+
+        # Filter out internal subtools of a Group/Macro so user only sees the top-level macro/effect
+        if parent is not None:
             continue
 
         # Filter out system and utility nodes
@@ -741,11 +748,18 @@ def get_clip_effect_tools(comp):
         if name.startswith("MediaIn") or name.startswith("MediaOut"):
             continue
 
-        label = f"{name} [{reg_id}]" if reg_id else name
+        if reg_id == "GroupOperator":
+            label = f"{name} [Fusion Effect]"
+        elif reg_id:
+            label = f"{name} [{reg_id}]"
+        else:
+            label = name
+
         result[label] = {
             "name": name,
             "reg_id": reg_id,
             "tool": tool,
+            "comp": comp,
             "display_name": label,
         }
 
@@ -953,13 +967,26 @@ def inject_keyframes_to_fusion_comp(video_item, target, frame_values, start_comp
     else:
         raise ValueError("Parametro 'target' non valido. Deve essere una stringa preset o un dizionario.")
 
-    comp = video_item.GetFusionCompByIndex(1)
-    if not comp:
-        comp = video_item.AddFusionComp()
-        if not comp:
-            raise RuntimeError("Impossibile creare o recuperare la Fusion Composition per la clip video.")
-
     mode = target_info.get("mode", "preset")
+
+    comp = None
+    if mode == "custom":
+        inp_info = target_info.get("inp_info", {})
+        comp = inp_info.get("comp")
+        tool_ref = inp_info.get("tool")
+        if not comp and tool_ref and hasattr(tool_ref, "Comp"):
+            try:
+                comp = tool_ref.Comp()
+            except Exception:
+                pass
+
+    if not comp and video_item:
+        comp = video_item.GetFusionCompByIndex(1)
+        if not comp:
+            comp = video_item.AddFusionComp()
+
+    if not comp:
+        raise RuntimeError("Impossibile creare o recuperare la Fusion Composition per la clip video.")
 
     if mode == "preset":
         preset_key = target_info["preset_key"]
@@ -1029,7 +1056,9 @@ def inject_keyframes_to_fusion_comp(video_item, target, frame_values, start_comp
     elif mode == "custom":
         inp_info = target_info["inp_info"]
         node_name = inp_info["tool_name"]
-        tool = comp.FindTool(node_name)
+        tool = inp_info.get("tool")
+        if not tool:
+            tool = comp.FindTool(node_name)
         if not tool:
             # Fallback search by TOOLS_Name attribute
             all_tools = comp.GetToolList(False)
@@ -1485,7 +1514,7 @@ class AudioEnvelopeApp:
         self.refresh_clip_effects()
 
     def refresh_clip_effects(self):
-        """Scans the active video clip's Fusion composition for effect nodes."""
+        """Scans all relevant Fusion compositions for effect nodes on the active clip."""
         items = self.win.GetItems()
         node_combo = items["EffectNodeCombo"]
         param_combo = items["EffectParamCombo"]
@@ -1499,27 +1528,96 @@ class AudioEnvelopeApp:
             items["PropDescLabel"].Text = "<font color='#aaaaaa'>Nessuna clip video attiva selezionata sulla timeline.</font>"
             return
 
-        comp = self.active_video_item.GetFusionCompByIndex(1)
-        if not comp:
-            node_combo.AddItem("(Nessuna Fusion Comp)")
-            items["PropDescLabel"].Text = (
-                "<font color='#ffaa33'>La clip non ha ancora una composizione Fusion. "
-                "Aggiungi un effetto dalla Edit Page o usa un Preset Rapido.</font>"
-            )
-            return
+        clip_dur = 0
+        try:
+            clip_dur = int(self.active_video_item.GetDuration())
+        except Exception:
+            clip_dur = 0
 
-        tools_dict = get_clip_effect_tools(comp)
+        # Collect candidate compositions
+        candidate_comps = []
+        seen_comps = set()
+
+        # 1. Compositions explicitly on the TimelineItem
+        try:
+            comp_count = self.active_video_item.GetFusionCompCount()
+            for i in range(1, comp_count + 1):
+                c = self.active_video_item.GetFusionCompByIndex(i)
+                if c:
+                    candidate_comps.append(c)
+        except Exception:
+            pass
+
+        # 2. Currently open composition in Fusion
+        if self.fusion:
+            try:
+                curr_c = self.fusion.GetCurrentComp()
+                if curr_c:
+                    candidate_comps.append(curr_c)
+            except Exception:
+                pass
+
+        # 3. Compositions in fusion.GetCompList() (e.g. Fusion Effects / Templates applied in Edit Page)
+        if self.fusion:
+            try:
+                complist = self.fusion.GetCompList()
+                if isinstance(complist, dict):
+                    comp_items = list(complist.values())
+                elif isinstance(complist, (list, tuple)):
+                    comp_items = list(complist)
+                else:
+                    comp_items = []
+
+                for c in comp_items:
+                    if not c:
+                        continue
+                    c_end = None
+                    c_file = ""
+                    r_flags = 0
+                    try:
+                        c_end = c.GetAttrs("COMPN_GlobalEnd")
+                        c_file = c.GetAttrs("COMPS_FileName") or ""
+                        r_flags = c.GetAttrs("COMPI_RenderFlags") or 0
+                    except Exception:
+                        pass
+
+                    matches_dur = (c_end is not None and clip_dur > 0 and abs(c_end - (clip_dur - 1)) <= 2)
+                    is_template = c_file.endswith(".drfx") or c_file.endswith(".setting")
+                    is_active = (r_flags != 0 or bool(c.GetAttrs("COMPB_Modified")))
+
+                    if (matches_dur and (is_template or is_active)) or is_template:
+                        candidate_comps.append(c)
+            except Exception:
+                pass
+
+        # Discover effect tools across all candidate compositions
+        tools_dict = {}
+        for c in candidate_comps:
+            c_ptr = None
+            try:
+                c_ptr = str(c)
+            except Exception:
+                c_ptr = id(c)
+            if c_ptr in seen_comps:
+                continue
+            seen_comps.add(c_ptr)
+
+            c_tools = get_clip_effect_tools(c)
+            for label, t_info in c_tools.items():
+                if label not in tools_dict:
+                    tools_dict[label] = t_info
+
         self.current_clip_tools = tools_dict
 
         if not tools_dict:
             node_combo.AddItem("(Nessun effetto trovato sulla clip)")
             items["PropDescLabel"].Text = (
-                "<font color='#ffaa33'>Nessun effetto rilevato sulla clip (esclusi MediaIn/MediaOut). "
-                "Aggiungi un effetto alla clip, poi clicca '↻ Rileva'.</font>"
+                "<font color='#ffaa33'>Nessun effetto rilevato sulla clip. "
+                "Aggiungi un effetto (Fusion Effect o OpenFX) dalla Edit Page, poi clicca '↻ Rileva'.</font>"
             )
             return
 
-        for display_name in tools_dict.keys():
+        for display_name in sorted(tools_dict.keys()):
             node_combo.AddItem(display_name)
 
         self.on_effect_node_changed(None)
@@ -1538,7 +1636,10 @@ class AudioEnvelopeApp:
             return
 
         tool = tool_info["tool"]
+        tool_comp = tool_info.get("comp")
         inputs_list = get_tool_animatable_inputs(tool)
+        for inp in inputs_list:
+            inp["comp"] = tool_comp
         self.current_tool_inputs = {inp["display_name"]: inp for inp in inputs_list}
 
         if not inputs_list:
@@ -1769,7 +1870,19 @@ class AudioEnvelopeApp:
             mapped_values = map_envelope_to_range(envelope, min_val, max_val)
 
             # Step 5: Fusion Keyframe Injection
-            comp = self.active_video_item.GetFusionCompByIndex(1)
+            comp = None
+            if is_preset_mode:
+                comp = self.active_video_item.GetFusionCompByIndex(1)
+            else:
+                comp = inp_info.get("comp")
+                if not comp and inp_info.get("tool") and hasattr(inp_info["tool"], "Comp"):
+                    try:
+                        comp = inp_info["tool"].Comp()
+                    except Exception:
+                        pass
+                if not comp:
+                    comp = self.active_video_item.GetFusionCompByIndex(1)
+
             start_comp_frame = 0
             if comp:
                 try:
