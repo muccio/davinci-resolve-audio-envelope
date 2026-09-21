@@ -94,6 +94,17 @@ cp AudioEnvelopeToVideo.py ~/.local/share/DaVinciResolve/Fusion/Scripts/Utility/
 
 ---
 
+## 🔧 Risoluzione Problemi (Troubleshooting)
+
+### La finestra non compare / Errore di connessione API
+- **Porta 49152 occupata:** L'architettura di scripting di DaVinci Resolve utilizza la porta 1144 e alloca la porta di ritorno IPC nel range `49152..65535` (di default `127.0.0.1:49152`). Se un'altra applicazione (ad es. **Ollama**) occupa la porta locale `49152`, la connessione fallirà restituendo `None`. Per verificare ed eventualmente liberare la porta:
+  ```bash
+  lsof -i :49152
+  ```
+- **Progetto attivo:** Assicurati che DaVinci Resolve Studio sia aperto con un progetto caricato e una timeline attiva nella Edit Page.
+
+---
+
 ## 🧪 Test Unitari
 
 Per eseguire la suite di test automatizzati:
