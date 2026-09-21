@@ -24,11 +24,24 @@ Un potente script Python standalone per **DaVinci Resolve (19, 20, 21+)** che co
   - Media mobile centrata (**Moving Average Smoothing**) per stabilizzare la risposta visiva.
   - Normalizzazione e rimappatura lineare nel range `[Min, Max]` scelto.
 
+- **Mappatura su Parametri Video & Effetti della Clip (Fusion & OpenFX):**
+  - **🎯 Preset Rapidi (Auto-creazione del nodo):**
+    - *Transform*: Zoom (`Size`), Rotazione (`Angle`), Spostamento X/Y (`Center_X`, `Center_Y`), Deformazione Scala (`XSize`, `YSize`).
+    - *Brightness & Contrast*: Flash / Boost (`Gain`), Ombre (`Lift`), Toni Medi (`Gamma`), Saturazione (`Saturation`).
+    - *Blur*: Sfocatura Dinamica (`BlurSize`), Mix Trasparenza (`Blend`).
+    - *Glow*: Bagliore Luminoso (`Glow`), Raggio Espansione (`GlowSize`).
+    - *Camera Shake*: Terremoto / Scuotimento (`OverallStrength`), Velocità (`Speed`), Vibrazione Orizzontale (`XShake`) e Verticale (`YShake`).
+    *(Se il nodo non è presente nella composizione Fusion della clip, lo script lo crea e lo collega automaticamente tra `MediaIn` e `MediaOut`).*
+  - **✨ Sfoglia Effetti sulla Clip (Nodi Fusion & OpenFX esistenti):**
+    - Scansione dinamica in tempo reale di **qualsiasi effetto o plugin OpenFX/ResolveFX** già applicato alla clip video (es. Gaussian Blur, Directional Blur, Color Corrector, Glow, Film Grain, Stylize, ecc.).
+    - Rilevamento automatico di tutti i parametri animabili di tipo **Number** (scalari) e **Point** (coordinate 2D con separazione automatica degli assi X e Y).
+    - Calcolo intelligente dei valori di default per Min e Max basato sul valore corrente e sui limiti di scala del cursore.
+    - Pulsante `↻ Rileva` per ri-scansionare istantaneamente la clip se aggiungi un effetto durante la sessione.
+
 - **Iniezione Keyframe Fusion ad Alte Prestazioni:**
   - Crea o recupera la Fusion Composition incorporata nel `TimelineItem` video.
-  - Genera nodi dedicati (`AudioEnvelope_Transform` o `AudioEnvelope_BC`) e li collega in pipeline prima di `MediaOut1` senza alterare eventuali nodi esistenti.
   - Utilizza `comp.Lock()` e `comp.Unlock()` per iniettare centinaia di keyframe in frazioni di secondo.
-  - Collega automaticamente le curve `BezierSpline` e `XYPath` per un'interpolazione fluida.
+  - Collega automaticamente le curve `BezierSpline` e `XYPath` per un'interpolazione fluida senza creare conflitti.
 
 - **Decodifica Audio Multi-Tier Resiliente:**
   - Supporta file **WAV, AIFF, MP3, AAC, M4A, ALAC, FLAC, MOV, MP4**.
@@ -70,12 +83,14 @@ cp AudioEnvelopeToVideo.py ~/.local/share/DaVinciResolve/Fusion/Scripts/Utility/
 3. Posiziona il **playhead** sopra le clip da elaborare.
 4. Vai nel menu in alto: **`Workspace` > `Scripts` > `AudioEnvelopeToVideo`**.
 5. Nella GUI:
-   - Seleziona la traccia audio e la traccia video.
-   - Scegli la **Proprietà Target** (es. `Transform: Size (Zoom)`, `BrightnessContrast: Gain`, `Transform: Angle`, ecc.).
-   - Scegli la **Banda Audio** (es. `Sub-Bass / Cassa (20 - 90 Hz)`).
+   - Seleziona la traccia audio e la traccia video (clicca su *Rileva Clip su Playhead* per verificare i file).
+   - Scegli la **Modalità Target**:
+     - **🎯 Preset Rapidi**: seleziona parametri pronti per Transform, Flash, Blur, Glow o Camera Shake.
+     - **✨ Effetti sulla Clip**: seleziona qualsiasi effetto già presente sulla clip video (es. plugin OpenFX, ResolveFX o nodi Fusion) e scegli il parametro numerico o asse X/Y da modulare.
+   - Scegli la **Banda Audio FFT** (es. `Sub-Bass / Cassa (20 - 90 Hz)` per far tremare o zoomare sul kick, oppure `Full Spectrum`).
    - Regola **Attack**, **Release** e **Smoothing**.
    - Clicca su **`⚡ ESTRAI AUDIO & GENERA AUTOMAZIONE ⚡`**.
-6. Premi **Play** nella timeline per vedere subito la clip video pulsare a ritmo di musica!
+6. Premi **Play** nella timeline per vedere subito la clip video o il suo effetto modulato sul ritmo dell'audio!
 
 ---
 

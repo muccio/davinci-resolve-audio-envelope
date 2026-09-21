@@ -539,6 +539,7 @@ def find_active_clip(timeline, track_type, track_index, playhead_frame):
 # ==============================================================================
 
 TARGET_PRESETS = {
+    # --- TRANSFORM PRESETS ---
     "Transform: Size (Zoom)": {
         "tool": "Transform",
         "node_id": "AudioEnvelope_Transform",
@@ -587,7 +588,8 @@ TARGET_PRESETS = {
         "default_max": 1.30,
         "description": "Deformazione scala verticale",
     },
-    "BrightnessContrast: Gain": {
+    # --- BRIGHTNESS & CONTRAST PRESETS ---
+    "BrightnessContrast: Gain (Flash)": {
         "tool": "BrightnessContrast",
         "node_id": "AudioEnvelope_BC",
         "param": "Gain",
@@ -619,23 +621,337 @@ TARGET_PRESETS = {
         "default_max": 2.20,
         "description": "Saturazione colore sul ritmo sonoro",
     },
+    # --- BLUR PRESETS ---
+    "Blur: BlurSize (Sfocatura)": {
+        "tool": "Blur",
+        "node_id": "AudioEnvelope_Blur",
+        "param": "BlurSize",
+        "default_min": 0.0,
+        "default_max": 3.0,
+        "description": "Sfocatura dinamica modulata dall'audio",
+    },
+    "Blur: Blend (Mix Sfocatura)": {
+        "tool": "Blur",
+        "node_id": "AudioEnvelope_Blur",
+        "param": "Blend",
+        "default_min": 0.0,
+        "default_max": 1.0,
+        "description": "Dissolvenza mix sfocatura sui picchi sonori",
+    },
+    # --- GLOW PRESETS ---
+    "Glow: Glow (Bagliore Luminoso)": {
+        "tool": "Glow",
+        "node_id": "AudioEnvelope_Glow",
+        "param": "Glow",
+        "default_min": 0.0,
+        "default_max": 0.85,
+        "description": "Bagliore luminoso pulsante a ritmo di musica",
+    },
+    "Glow: GlowSize (Raggio Bagliore)": {
+        "tool": "Glow",
+        "node_id": "AudioEnvelope_Glow",
+        "param": "GlowSize",
+        "default_min": 5.0,
+        "default_max": 25.0,
+        "description": "Dimensione ed espansione del raggio di bagliore",
+    },
+    # --- CAMERA SHAKE PRESETS ---
+    "CameraShake: Overall Strength (Scuotimento)": {
+        "tool": "CameraShake",
+        "node_id": "AudioEnvelope_Shake",
+        "param": "OverallStrength",
+        "default_min": 0.0,
+        "default_max": 1.0,
+        "description": "Vibrazione/terremoto camera sui colpi di basso",
+    },
+    "CameraShake: Speed (Velocità Shake)": {
+        "tool": "CameraShake",
+        "node_id": "AudioEnvelope_Shake",
+        "param": "Speed",
+        "default_min": 1.0,
+        "default_max": 4.0,
+        "description": "Velocità di oscillazione della vibrazione camera",
+    },
+    "CameraShake: XShake (Vibrazione Orizzontale)": {
+        "tool": "CameraShake",
+        "node_id": "AudioEnvelope_Shake",
+        "param": "XShake",
+        "default_min": 0.0,
+        "default_max": 0.50,
+        "description": "Ampiezza vibrazione asse X",
+    },
+    "CameraShake: YShake (Vibrazione Verticale)": {
+        "tool": "CameraShake",
+        "node_id": "AudioEnvelope_Shake",
+        "param": "YShake",
+        "default_min": 0.0,
+        "default_max": 0.50,
+        "description": "Ampiezza vibrazione asse Y",
+    },
+}
+
+# Alias for backwards compatibility
+TARGET_PRESETS["BrightnessContrast: Gain"] = TARGET_PRESETS["BrightnessContrast: Gain (Flash)"]
+
+# Non-effect Fusion node types to exclude from effect selector
+IGNORED_FUSION_TOOLS = {
+    "MediaIn", "MediaOut", "BezierSpline", "XYPath", "Polyline",
+    "LookUpTable", "PipeRouter", "Underlay", "Note", "TimeSpeed",
 }
 
 
-def inject_keyframes_to_fusion_comp(video_item, preset_key, frame_values, start_comp_frame=0):
+def get_clip_effect_tools(comp):
+    """
+    Returns a dict mapping display_name -> tool_info dict for all effect tools
+    present in the clip's Fusion composition:
+    {
+        "Blur1 [Blur]": {"name": "Blur1", "reg_id": "Blur", "tool": ToolObject, "display_name": "Blur1 [Blur]"},
+        ...
+    }
+    """
+    if not comp:
+        return {}
+
+    all_tools = {}
+    try:
+        raw_tools = comp.GetToolList(False)
+        if isinstance(raw_tools, dict):
+            all_tools = raw_tools
+        elif isinstance(raw_tools, (list, tuple)):
+            all_tools = {i: t for i, t in enumerate(raw_tools)}
+    except Exception:
+        return {}
+
+    result = {}
+    for tool in all_tools.values():
+        if not tool:
+            continue
+        try:
+            name = tool.GetAttrs("TOOLS_Name") or ""
+            reg_id = tool.GetAttrs("TOOLS_RegID") or ""
+        except Exception:
+            continue
+
+        if not name:
+            continue
+
+        # Filter out system and utility nodes
+        if reg_id in IGNORED_FUSION_TOOLS:
+            continue
+        if name.startswith("MediaIn") or name.startswith("MediaOut"):
+            continue
+
+        label = f"{name} [{reg_id}]" if reg_id else name
+        result[label] = {
+            "name": name,
+            "reg_id": reg_id,
+            "tool": tool,
+            "display_name": label,
+        }
+
+    return result
+
+
+def get_tool_animatable_inputs(tool):
+    """
+    Scans a Fusion tool's inputs and returns a list of dicts describing animatable
+    Number or Point inputs:
+    [
+        {
+            "id": "BlurSize",
+            "name": "Blur Size",
+            "display_name": "Blur Size [BlurSize]",
+            "data_type": "Number",
+            "is_point": False,
+            "point_axis": None,
+            "base_id": "BlurSize",
+            "tool_name": "Blur1",
+            "tool": tool,
+            "min_scale": 0.0,
+            "max_scale": 10.0,
+            "default_val": 0.0,
+        },
+        ...
+    ]
+    """
+    if not tool:
+        return []
+
+    try:
+        raw_inputs = tool.GetInputList()
+    except Exception:
+        return []
+
+    inputs_dict = {}
+    if isinstance(raw_inputs, dict):
+        inputs_dict = raw_inputs
+    elif isinstance(raw_inputs, (list, tuple)):
+        inputs_dict = {i: inp for i, inp in enumerate(raw_inputs)}
+
+    try:
+        tool_name = tool.GetAttrs("TOOLS_Name") or "Tool"
+    except Exception:
+        tool_name = "Tool"
+
+    animatable = []
+    seen_ids = set()
+
+    for inp in inputs_dict.values():
+        if not inp:
+            continue
+        try:
+            inp_id = inp.GetAttrs("INPS_ID") or ""
+            inp_name = inp.GetAttrs("INPS_Name") or inp_id
+            data_type = inp.GetAttrs("INPS_DataType") or ""
+            is_passive = bool(inp.GetAttrs("INPB_Passive"))
+        except Exception:
+            continue
+
+        if not inp_id or is_passive:
+            continue
+
+        # Skip internal inputs
+        if inp_id.startswith("_") or inp_id in ("ProcessMode", "Nest", "ProcessRange", "ProcessFlags", "Quality"):
+            continue
+
+        if inp_id in seen_ids:
+            continue
+        seen_ids.add(inp_id)
+
+        min_scale = None
+        max_scale = None
+        default_val = None
+        try:
+            min_scale = inp.GetAttrs("INPN_MinScale")
+            max_scale = inp.GetAttrs("INPN_MaxScale")
+            default_val = inp.GetAttrs("INPN_Default")
+        except Exception:
+            pass
+
+        if data_type == "Number":
+            disp = f"{inp_name} [{inp_id}]" if inp_name != inp_id else inp_name
+            animatable.append({
+                "id": inp_id,
+                "name": inp_name,
+                "display_name": disp,
+                "data_type": "Number",
+                "is_point": False,
+                "point_axis": None,
+                "base_id": inp_id,
+                "tool_name": tool_name,
+                "tool": tool,
+                "min_scale": min_scale,
+                "max_scale": max_scale,
+                "default_val": default_val,
+            })
+        elif data_type == "Point":
+            disp_x = f"{inp_name} - Asse X [{inp_id}.X]"
+            animatable.append({
+                "id": f"{inp_id}_X",
+                "name": f"{inp_name} (X)",
+                "display_name": disp_x,
+                "data_type": "Point",
+                "is_point": True,
+                "point_axis": "X",
+                "base_id": inp_id,
+                "tool_name": tool_name,
+                "tool": tool,
+                "min_scale": min_scale,
+                "max_scale": max_scale,
+                "default_val": default_val,
+            })
+            disp_y = f"{inp_name} - Asse Y [{inp_id}.Y]"
+            animatable.append({
+                "id": f"{inp_id}_Y",
+                "name": f"{inp_name} (Y)",
+                "display_name": disp_y,
+                "data_type": "Point",
+                "is_point": True,
+                "point_axis": "Y",
+                "base_id": inp_id,
+                "tool_name": tool_name,
+                "tool": tool,
+                "min_scale": min_scale,
+                "max_scale": max_scale,
+                "default_val": default_val,
+            })
+
+    return animatable
+
+
+def compute_default_range_for_input(inp_info):
+    """
+    Computes intelligent default Min and Max values based on the input's current
+    value and UI scale limits.
+    """
+    if not inp_info:
+        return 0.0, 1.0
+
+    tool = inp_info.get("tool")
+    base_id = inp_info.get("base_id", inp_info.get("id"))
+    is_point = inp_info.get("is_point", False)
+    point_axis = inp_info.get("point_axis")
+    min_scale = inp_info.get("min_scale")
+    max_scale = inp_info.get("max_scale")
+
+    curr_val = None
+    if tool:
+        try:
+            curr_val = tool.GetInput(base_id)
+        except Exception:
+            pass
+
+    if is_point:
+        val = 0.5
+        if isinstance(curr_val, (list, tuple)) and len(curr_val) >= 2:
+            val = float(curr_val[0] if point_axis == "X" else curr_val[1])
+        elif isinstance(curr_val, dict):
+            val = float(curr_val.get(1 if point_axis == "X" else 2, 0.5))
+        return round(val, 3), round(val + 0.05, 3)
+
+    if isinstance(curr_val, (int, float)):
+        num = float(curr_val)
+        if abs(num) > 0.0001:
+            min_v = round(num, 3)
+            max_v = round(num * 1.5 if num > 0 else num * 0.5, 3)
+            if max_scale is not None and max_v > float(max_scale):
+                max_v = round(float(max_scale), 3)
+            return min_v, max_v
+        else:
+            if max_scale is not None and float(max_scale) > 0:
+                return 0.0, round(float(max_scale) * 0.5, 3)
+            return 0.0, 1.0
+
+    if min_scale is not None and max_scale is not None:
+        try:
+            return round(float(min_scale), 3), round(float(max_scale), 3)
+        except Exception:
+            pass
+
+    return 0.0, 1.0
+
+
+def inject_keyframes_to_fusion_comp(video_item, target, frame_values, start_comp_frame=0):
     """
     Injects keyframe animation into the Fusion composition of the video item.
 
     Handles:
       - Finding or adding a Fusion composition on the TimelineItem.
-      - Creating or reusing the specific effect node (AudioEnvelope_Transform or AudioEnvelope_BC).
-      - Connecting the node between MediaIn and MediaOut if newly created.
+      - Target can be a preset key string (e.g. 'Transform: Size (Zoom)')
+        or a target dict {'mode': 'preset', 'preset_key': ...}
+        or a target dict {'mode': 'custom', 'inp_info': ...}
+      - For preset mode: creates or reuses the node and splices it into the pipeline.
+      - For custom mode: targets the existing node and its parameter on the clip.
+      - Dynamic spline connection: connects BezierSpline or XYPath if needed.
       - Batch keyframe injection using comp.Lock() and comp.Unlock() for high performance.
     """
-    preset = TARGET_PRESETS[preset_key]
-    tool_type = preset["tool"]
-    node_name = preset["node_id"]
-    param_name = preset["param"]
+    # Normalize target specification
+    if isinstance(target, str):
+        target_info = {"mode": "preset", "preset_key": target}
+    elif isinstance(target, dict):
+        target_info = target
+    else:
+        raise ValueError("Parametro 'target' non valido. Deve essere una stringa preset o un dizionario.")
 
     comp = video_item.GetFusionCompByIndex(1)
     if not comp:
@@ -643,87 +959,147 @@ def inject_keyframes_to_fusion_comp(video_item, preset_key, frame_values, start_
         if not comp:
             raise RuntimeError("Impossibile creare o recuperare la Fusion Composition per la clip video.")
 
-    # Check if our envelope tool already exists
-    tool = comp.FindTool(node_name)
-    if not tool:
-        tool = comp.AddTool(tool_type)
+    mode = target_info.get("mode", "preset")
+
+    if mode == "preset":
+        preset_key = target_info["preset_key"]
+        if preset_key not in TARGET_PRESETS:
+            raise KeyError(f"Preset '{preset_key}' non trovato.")
+        preset = TARGET_PRESETS[preset_key]
+        tool_type = preset["tool"]
+        node_name = preset["node_id"]
+        param_name = preset["param"]
+        is_point_x = (param_name == "Center_X")
+        is_point_y = (param_name == "Center_Y")
+        is_point = is_point_x or is_point_y
+        point_axis = "X" if is_point_x else ("Y" if is_point_y else None)
+        base_param = "Center" if is_point else param_name
+
+        # Check if our envelope tool already exists
+        tool = comp.FindTool(node_name)
         if not tool:
-            raise RuntimeError(f"Impossibile aggiungere il nodo Fusion '{tool_type}'.")
+            tool = comp.AddTool(tool_type)
+            if not tool:
+                raise RuntimeError(f"Impossibile aggiungere il nodo Fusion '{tool_type}'.")
 
-        try:
-            tool.SetAttrs({"TOOLS_Name": node_name})
-        except Exception:
-            pass
+            try:
+                tool.SetAttrs({"TOOLS_Name": node_name})
+            except Exception:
+                pass
 
-        # Identify MediaIn and MediaOut tools
-        media_in = comp.FindTool("MediaIn1")
-        media_out = comp.FindTool("MediaOut1")
+            # Identify MediaIn and MediaOut tools
+            media_in = comp.FindTool("MediaIn1")
+            media_out = comp.FindTool("MediaOut1")
 
-        if not media_in or not media_out:
+            if not media_in or not media_out:
+                all_tools = comp.GetToolList(False)
+                tools_map = all_tools if isinstance(all_tools, dict) else {i: t for i, t in enumerate(all_tools)}
+                for t in tools_map.values():
+                    try:
+                        reg = t.GetAttrs("TOOLS_RegID")
+                        if reg == "MediaIn" and not media_in:
+                            media_in = t
+                        elif reg == "MediaOut" and not media_out:
+                            media_out = t
+                    except Exception:
+                        pass
+
+            # Wire the node cleanly into the comp pipeline
+            if media_out:
+                upstream = None
+                try:
+                    upstream = media_out.Input.GetConnectedOutput()
+                except Exception:
+                    pass
+
+                if not upstream and media_in:
+                    upstream = media_in
+
+                if upstream:
+                    try:
+                        tool.ConnectInput("Input", upstream)
+                    except Exception:
+                        pass
+
+                try:
+                    media_out.ConnectInput("Input", tool)
+                except Exception:
+                    pass
+
+    elif mode == "custom":
+        inp_info = target_info["inp_info"]
+        node_name = inp_info["tool_name"]
+        tool = comp.FindTool(node_name)
+        if not tool:
+            # Fallback search by TOOLS_Name attribute
             all_tools = comp.GetToolList(False)
-            for t in all_tools.values():
+            tools_map = all_tools if isinstance(all_tools, dict) else {i: t for i, t in enumerate(all_tools)}
+            for t in tools_map.values():
                 try:
-                    reg = t.GetAttrs("TOOLS_RegID")
-                    if reg == "MediaIn" and not media_in:
-                        media_in = t
-                    elif reg == "MediaOut" and not media_out:
-                        media_out = t
+                    if t.GetAttrs("TOOLS_Name") == node_name:
+                        tool = t
+                        break
                 except Exception:
                     pass
 
-        # Wire the node cleanly into the comp pipeline
-        if media_out:
-            upstream = None
-            try:
-                upstream = media_out.Input.GetConnectedOutput()
-            except Exception:
-                pass
+        if not tool:
+            raise RuntimeError(f"Nodo effetto '{node_name}' non trovato nella composizione Fusion della clip.")
 
-            if not upstream and media_in:
-                upstream = media_in
+        param_name = inp_info["id"]
+        base_param = inp_info.get("base_id", param_name)
+        is_point = inp_info.get("is_point", False)
+        point_axis = inp_info.get("point_axis")
+        is_point_x = (point_axis == "X")
+        is_point_y = (point_axis == "Y")
+    else:
+        raise ValueError(f"Modalità target sconosciuta: '{mode}'")
 
-            if upstream:
-                try:
-                    tool.ConnectInput("Input", upstream)
-                except Exception:
-                    pass
-
-            try:
-                media_out.ConnectInput("Input", tool)
-            except Exception:
-                pass
-
-    # Ensure parameter has an animation spline attached before setting keyframes
-    if param_name in ("Center_X", "Center_Y"):
+    # Connect Spline / Modifiers if not already connected
+    if is_point:
         try:
-            # Check if Center is already connected to a path
-            center_inp = tool.FindMainInput(1) # fallback
             inputs = tool.GetInputList()
-            center_connected = False
-            for k, inp in inputs.items():
-                if inp.GetAttrs("INPS_ID") == "Center":
-                    center_connected = bool(inp.GetConnectedOutput())
-                    break
-            if not center_connected:
+            inp_map = inputs if isinstance(inputs, dict) else {i: inp for i, inp in enumerate(inputs)}
+            point_connected = False
+            for inp in inp_map.values():
+                try:
+                    if inp.GetAttrs("INPS_ID") == base_param:
+                        point_connected = bool(inp.GetConnectedOutput())
+                        break
+                except Exception:
+                    pass
+
+            if not point_connected:
                 xypath = comp.XYPath()
-                tool.ConnectInput("Center", xypath)
-                if param_name == "Center_X":
+                tool.ConnectInput(base_param, xypath)
+                if point_axis == "X":
                     xypath.ConnectInput("X", comp.BezierSpline())
                 else:
                     xypath.ConnectInput("Y", comp.BezierSpline())
+            else:
+                try:
+                    conn = tool.GetInput(base_param)
+                    if hasattr(conn, "ConnectInput"):
+                        conn.ConnectInput(point_axis, comp.BezierSpline())
+                except Exception:
+                    pass
         except Exception:
             pass
     else:
         try:
             inputs = tool.GetInputList()
+            inp_map = inputs if isinstance(inputs, dict) else {i: inp for i, inp in enumerate(inputs)}
             is_connected = False
-            for k, inp in inputs.items():
-                if inp.GetAttrs("INPS_ID") == param_name:
-                    is_connected = bool(inp.GetConnectedOutput())
-                    break
+            for inp in inp_map.values():
+                try:
+                    if inp.GetAttrs("INPS_ID") == base_param:
+                        is_connected = bool(inp.GetConnectedOutput())
+                        break
+                except Exception:
+                    pass
+
             if not is_connected:
                 spline = comp.BezierSpline()
-                tool.ConnectInput(param_name, spline)
+                tool.ConnectInput(base_param, spline)
         except Exception:
             pass
 
@@ -733,34 +1109,27 @@ def inject_keyframes_to_fusion_comp(video_item, preset_key, frame_values, start_
         for idx, val in enumerate(frame_values):
             target_frame = float(start_comp_frame + idx)
 
-            if param_name == "Center_X":
+            if is_point:
                 curr = None
                 try:
-                    curr = tool.GetInput("Center", target_frame)
+                    curr = tool.GetInput(base_param, target_frame)
                 except Exception:
                     pass
-                y_val = 0.5
-                if isinstance(curr, dict):
-                    y_val = curr.get(2, 0.5)
-                elif isinstance(curr, (list, tuple)) and len(curr) > 1:
-                    y_val = curr[1]
-                tool.SetInput("Center", [float(val), float(y_val)], target_frame)
 
-            elif param_name == "Center_Y":
-                curr = None
-                try:
-                    curr = tool.GetInput("Center", target_frame)
-                except Exception:
-                    pass
-                x_val = 0.5
+                curr_x, curr_y = 0.5, 0.5
                 if isinstance(curr, dict):
-                    x_val = curr.get(1, 0.5)
-                elif isinstance(curr, (list, tuple)) and len(curr) > 0:
-                    x_val = curr[0]
-                tool.SetInput("Center", [float(x_val), float(val)], target_frame)
+                    curr_x = curr.get(1, 0.5)
+                    curr_y = curr.get(2, 0.5)
+                elif isinstance(curr, (list, tuple)) and len(curr) >= 2:
+                    curr_x, curr_y = curr[0], curr[1]
+
+                if point_axis == "X":
+                    tool.SetInput(base_param, [float(val), float(curr_y)], target_frame)
+                elif point_axis == "Y":
+                    tool.SetInput(base_param, [float(curr_x), float(val)], target_frame)
 
             else:
-                tool.SetInput(param_name, float(val), target_frame)
+                tool.SetInput(base_param, float(val), target_frame)
     finally:
         comp.Unlock()
 
@@ -805,6 +1174,9 @@ class AudioEnvelopeApp:
         self.active_video_item = None
         self.active_audio_item = None
         self.audio_file_path = None
+
+        self.current_clip_tools = {}
+        self.current_tool_inputs = {}
 
         self.win = None
 
@@ -881,17 +1253,35 @@ class AudioEnvelopeApp:
             }),
         ])
 
-        # Target Property Group
-        prop_items = list(TARGET_PRESETS.keys())
-        first_preset = TARGET_PRESETS[prop_items[0]]
+        # Target Property & Effect Group
+        first_preset_key = list(TARGET_PRESETS.keys())[0]
+        first_preset = TARGET_PRESETS[first_preset_key]
 
         target_group = self.ui.VGroup({"Weight": 0, "Spacing": 4}, [
-            self.ui.Label({"Text": "<b>2. PARAMETRO TARGET VIDEO</b>", "Font": section_font}),
+            self.ui.Label({"Text": "<b>2. PARAMETRO TARGET VIDEO & EFFETTI</b>", "Font": section_font}),
             self.ui.HGroup({"Weight": 0, "Spacing": 6}, [
-                self.ui.Label({"Text": "Proprietà:", "Weight": 0.3, "Font": body_font}),
+                self.ui.Label({"Text": "Modalità Target:", "Weight": 0.3, "Font": body_font}),
+                self.ui.ComboBox({"ID": "TargetModeCombo", "Weight": 0.7, "Events": {"CurrentIndexChanged": True}}),
+            ]),
+            self.ui.HGroup({"ID": "PresetRow", "Weight": 0, "Spacing": 6}, [
+                self.ui.Label({"Text": "Preset Rapido:", "Weight": 0.3, "Font": body_font}),
                 self.ui.ComboBox({"ID": "TargetPropCombo", "Weight": 0.7, "Events": {"CurrentIndexChanged": True}}),
             ]),
-            self.ui.Label({"ID": "PropDescLabel", "Text": f"<i>{first_preset['description']}</i>", "Font": body_font}),
+            self.ui.HGroup({"ID": "EffectNodeRow", "Weight": 0, "Spacing": 6}, [
+                self.ui.Label({"Text": "Effetto / Nodo:", "Weight": 0.3, "Font": body_font}),
+                self.ui.ComboBox({"ID": "EffectNodeCombo", "Weight": 0.48, "Events": {"CurrentIndexChanged": True}}),
+                self.ui.Button({"ID": "RescanEffectsBtn", "Text": "↻ Rileva", "Weight": 0.22}),
+            ]),
+            self.ui.HGroup({"ID": "EffectParamRow", "Weight": 0, "Spacing": 6}, [
+                self.ui.Label({"Text": "Parametro Effetto:", "Weight": 0.3, "Font": body_font}),
+                self.ui.ComboBox({"ID": "EffectParamCombo", "Weight": 0.7, "Events": {"CurrentIndexChanged": True}}),
+            ]),
+            self.ui.Label({
+                "ID": "PropDescLabel",
+                "Text": f"<i>{first_preset['description']}</i>",
+                "Font": body_font,
+                "WordWrap": True,
+            }),
             self.ui.HGroup({"Weight": 0, "Spacing": 6}, [
                 self.ui.Label({"Text": "Valore Min (Silenzio):", "Weight": 0.35, "Font": body_font}),
                 self.ui.LineEdit({"ID": "MinValueEdit", "Text": str(first_preset["default_min"]), "Weight": 0.25}),
@@ -991,7 +1381,7 @@ class AudioEnvelopeApp:
         window_config = {
             "ID": self.WINDOW_ID,
             "WindowTitle": "DaVinci Resolve - Audio Envelope to Video Keyframes",
-            "Geometry": [350, 100, 540, 710],
+            "Geometry": [350, 60, 560, 780],
         }
 
         self.win = self.dispatcher.AddWindow(window_config, main_layout)
@@ -1000,7 +1390,7 @@ class AudioEnvelopeApp:
         self.on_refresh_clips_clicked(None)
 
     def populate_dropdowns(self):
-        """Populates ComboBoxes with tracks and preset properties."""
+        """Populates ComboBoxes with tracks, presets, modes, and frequency bands."""
         items = self.win.GetItems()
 
         a_combo = items["AudioTrackCombo"]
@@ -1013,15 +1403,25 @@ class AudioEnvelopeApp:
         for t in self.v_track_names:
             v_combo.AddItem(t)
 
+        m_combo = items["TargetModeCombo"]
+        m_combo.Clear()
+        m_combo.AddItem("🎯 Preset Rapidi (Auto-crea nodo se assente)")
+        m_combo.AddItem("✨ Effetti sulla Clip (Nodi Fusion & OpenFX esistenti)")
+
         p_combo = items["TargetPropCombo"]
         p_combo.Clear()
+        seen_keys = set()
         for p in TARGET_PRESETS.keys():
-            p_combo.AddItem(p)
+            if p not in seen_keys:
+                p_combo.AddItem(p)
+                seen_keys.add(p)
 
         f_combo = items["FreqBandCombo"]
         f_combo.Clear()
         for f_name in FREQUENCY_PRESETS.keys():
             f_combo.AddItem(f_name)
+
+        self.update_target_mode_ui()
 
     def connect_events(self):
         """Binds UI interaction event handlers."""
@@ -1030,14 +1430,18 @@ class AudioEnvelopeApp:
 
         # Buttons
         self.win.On["RefreshClipsBtn"].Clicked = self.on_refresh_clips_clicked
+        self.win.On["RescanEffectsBtn"].Clicked = self.on_rescan_effects_clicked
         self.win.On["ExecuteBtn"].Clicked = self.on_execute_clicked
 
         # Track Combos
         self.win.On["AudioTrackCombo"].CurrentIndexChanged = self.on_track_selection_changed
         self.win.On["VideoTrackCombo"].CurrentIndexChanged = self.on_track_selection_changed
 
-        # Target Property Combo
+        # Target Mode & Property Combos
+        self.win.On["TargetModeCombo"].CurrentIndexChanged = self.on_target_mode_changed
         self.win.On["TargetPropCombo"].CurrentIndexChanged = self.on_target_property_changed
+        self.win.On["EffectNodeCombo"].CurrentIndexChanged = self.on_effect_node_changed
+        self.win.On["EffectParamCombo"].CurrentIndexChanged = self.on_effect_param_changed
 
         # Frequency Band Combo
         self.win.On["FreqBandCombo"].CurrentIndexChanged = self.on_freq_band_changed
@@ -1052,6 +1456,119 @@ class AudioEnvelopeApp:
 
     def on_close(self, ev):
         self.dispatcher.ExitLoop()
+
+    def update_target_mode_ui(self):
+        """Toggles widget states depending on whether presets or clip effects are active."""
+        items = self.win.GetItems()
+        is_preset = (items["TargetModeCombo"].CurrentIndex == 0)
+
+        try:
+            items["TargetPropCombo"].Enabled = is_preset
+        except Exception:
+            pass
+        try:
+            items["EffectNodeCombo"].Enabled = not is_preset
+            items["RescanEffectsBtn"].Enabled = not is_preset
+            items["EffectParamCombo"].Enabled = not is_preset
+        except Exception:
+            pass
+
+        if is_preset:
+            self.on_target_property_changed(None)
+        else:
+            self.refresh_clip_effects()
+
+    def on_target_mode_changed(self, ev):
+        self.update_target_mode_ui()
+
+    def on_rescan_effects_clicked(self, ev):
+        self.refresh_clip_effects()
+
+    def refresh_clip_effects(self):
+        """Scans the active video clip's Fusion composition for effect nodes."""
+        items = self.win.GetItems()
+        node_combo = items["EffectNodeCombo"]
+        param_combo = items["EffectParamCombo"]
+        node_combo.Clear()
+        param_combo.Clear()
+        self.current_clip_tools = {}
+        self.current_tool_inputs = {}
+
+        if not self.active_video_item:
+            node_combo.AddItem("(Seleziona prima una clip video)")
+            items["PropDescLabel"].Text = "<font color='#aaaaaa'>Nessuna clip video attiva selezionata sulla timeline.</font>"
+            return
+
+        comp = self.active_video_item.GetFusionCompByIndex(1)
+        if not comp:
+            node_combo.AddItem("(Nessuna Fusion Comp)")
+            items["PropDescLabel"].Text = (
+                "<font color='#ffaa33'>La clip non ha ancora una composizione Fusion. "
+                "Aggiungi un effetto dalla Edit Page o usa un Preset Rapido.</font>"
+            )
+            return
+
+        tools_dict = get_clip_effect_tools(comp)
+        self.current_clip_tools = tools_dict
+
+        if not tools_dict:
+            node_combo.AddItem("(Nessun effetto trovato sulla clip)")
+            items["PropDescLabel"].Text = (
+                "<font color='#ffaa33'>Nessun effetto rilevato sulla clip (esclusi MediaIn/MediaOut). "
+                "Aggiungi un effetto alla clip, poi clicca '↻ Rileva'.</font>"
+            )
+            return
+
+        for display_name in tools_dict.keys():
+            node_combo.AddItem(display_name)
+
+        self.on_effect_node_changed(None)
+
+    def on_effect_node_changed(self, ev):
+        """Populates the parameter dropdown for the selected effect tool."""
+        items = self.win.GetItems()
+        node_combo = items["EffectNodeCombo"]
+        param_combo = items["EffectParamCombo"]
+        param_combo.Clear()
+        self.current_tool_inputs = {}
+
+        selected_node_text = node_combo.CurrentText
+        tool_info = self.current_clip_tools.get(selected_node_text)
+        if not tool_info:
+            return
+
+        tool = tool_info["tool"]
+        inputs_list = get_tool_animatable_inputs(tool)
+        self.current_tool_inputs = {inp["display_name"]: inp for inp in inputs_list}
+
+        if not inputs_list:
+            param_combo.AddItem("(Nessun parametro numerico animabile)")
+            items["PropDescLabel"].Text = f"<font color='#ffaa33'>Il nodo '{tool_info['name']}' non ha parametri numerici animabili.</font>"
+            return
+
+        for inp in inputs_list:
+            param_combo.AddItem(inp["display_name"])
+
+        self.on_effect_param_changed(None)
+
+    def on_effect_param_changed(self, ev):
+        """Updates min/max values and description for the chosen effect parameter."""
+        items = self.win.GetItems()
+        param_combo = items["EffectParamCombo"]
+        selected_param_text = param_combo.CurrentText
+        inp_info = self.current_tool_inputs.get(selected_param_text)
+        if not inp_info:
+            return
+
+        min_v, max_v = compute_default_range_for_input(inp_info)
+        items["MinValueEdit"].Text = str(min_v)
+        items["MaxValueEdit"].Text = str(max_v)
+
+        axis_info = f" [Asse {inp_info['point_axis']}]" if inp_info.get("point_axis") else ""
+        items["PropDescLabel"].Text = (
+            f"<font color='#33bbff'>Nodo: <b>{inp_info['tool_name']}</b> | Parametro: "
+            f"<b>{inp_info['name']}{axis_info}</b> (Tipo: {inp_info['data_type']})</font>"
+        )
 
     def on_freq_band_changed(self, ev):
         items = self.win.GetItems()
@@ -1136,6 +1653,10 @@ class AudioEnvelopeApp:
         )
         items["StatusLabel"].Text = "<font color='#44bb44'>Clip rilevate con successo.</font>"
 
+        # If currently in Effect Node mode, refresh effects from the active video clip
+        if items["TargetModeCombo"].CurrentIndex == 1:
+            self.refresh_clip_effects()
+
     def on_execute_clicked(self, ev):
         """Performs DSP extraction and injects keyframes into Fusion."""
         items = self.win.GetItems()
@@ -1185,7 +1706,21 @@ class AudioEnvelopeApp:
         smooth_window = items["SmoothSpin"].Value
         attack = items["AttackSlider"].Value / 100.0
         release = items["ReleaseSlider"].Value / 100.0
-        target_preset_key = items["TargetPropCombo"].CurrentText
+
+        # Determine target specification (Preset vs Custom Effect)
+        is_preset_mode = (items["TargetModeCombo"].CurrentIndex == 0)
+        if is_preset_mode:
+            target_preset_key = items["TargetPropCombo"].CurrentText
+            target_spec = {"mode": "preset", "preset_key": target_preset_key}
+            target_display_name = target_preset_key
+        else:
+            selected_param_text = items["EffectParamCombo"].CurrentText
+            inp_info = self.current_tool_inputs.get(selected_param_text)
+            if not inp_info:
+                items["StatusLabel"].Text = "<font color='#ff4444'>Errore: Seleziona un effetto e un parametro valido sulla clip.</font>"
+                return
+            target_spec = {"mode": "custom", "inp_info": inp_info}
+            target_display_name = f"{inp_info['tool_name']} -> {inp_info['name']}"
 
         is_full_spectrum = (min_freq <= 25.0 and max_freq >= 19000.0)
         band_str = "Full Spectrum" if is_full_spectrum else f"{int(min_freq)}-{int(max_freq)} Hz"
@@ -1245,12 +1780,12 @@ class AudioEnvelopeApp:
                     start_comp_frame = 0
 
             node_name, total_keys = inject_keyframes_to_fusion_comp(
-                self.active_video_item, target_preset_key, mapped_values, start_comp_frame
+                self.active_video_item, target_spec, mapped_values, start_comp_frame
             )
 
             items["StatusLabel"].Text = (
                 f"<font color='#33dd55'><b>Successo!</b> Generati {total_keys} keyframe sul nodo "
-                f"<b>'{node_name}'</b> (Proprietà: {target_preset_key} | Banda: {band_str}).</font>"
+                f"<b>'{node_name}'</b> (Parametro: {target_display_name} | Banda: {band_str}).</font>"
             )
 
         except Exception as e:

@@ -23,6 +23,10 @@ from AudioEnvelopeToVideo import (
     FREQUENCY_PRESETS,
     PurePythonFFT,
     compute_frame_fft_band,
+    get_clip_effect_tools,
+    get_tool_animatable_inputs,
+    compute_default_range_for_input,
+    inject_keyframes_to_fusion_comp,
 )
 
 class TestAudioEnvelope(unittest.TestCase):
@@ -178,6 +182,258 @@ class TestAudioEnvelope(unittest.TestCase):
         for name, (min_f, max_f) in FREQUENCY_PRESETS.items():
             self.assertGreaterEqual(min_f, 0)
             self.assertGreater(max_f, min_f)
+
+    def test_extended_presets_and_alias(self):
+        # Verify expanded presets
+        self.assertIn("Blur: BlurSize (Sfocatura)", TARGET_PRESETS)
+        self.assertIn("Glow: Glow (Bagliore Luminoso)", TARGET_PRESETS)
+        self.assertIn("CameraShake: Overall Strength (Scuotimento)", TARGET_PRESETS)
+        # Verify backwards compatibility alias
+        self.assertIn("BrightnessContrast: Gain", TARGET_PRESETS)
+        self.assertEqual(TARGET_PRESETS["BrightnessContrast: Gain"]["tool"], "BrightnessContrast")
+
+    def test_get_clip_effect_tools(self):
+        comp = MockFusionComp()
+        comp.tools["MediaIn1"] = MockFusionTool("MediaIn1", "MediaIn")
+        comp.tools["MediaOut1"] = MockFusionTool("MediaOut1", "MediaOut")
+        comp.tools["Spline1"] = MockFusionTool("Spline1", "BezierSpline")
+        comp.tools["Blur1"] = MockFusionTool("Blur1", "Blur")
+        comp.tools["OFX_Glow1"] = MockFusionTool("OFX_Glow1", "OpenFX")
+
+        effects = get_clip_effect_tools(comp)
+        self.assertEqual(len(effects), 2)
+        self.assertIn("Blur1 [Blur]", effects)
+        self.assertIn("OFX_Glow1 [OpenFX]", effects)
+        self.assertEqual(effects["Blur1 [Blur]"]["name"], "Blur1")
+
+    def test_get_tool_animatable_inputs(self):
+        tool = MockFusionTool("TestEffect1", "CustomPlugin")
+        tool.inputs = {
+            1: MockFusionInput("BlurSize", "Blur Size", "Number", is_passive=False, min_scale=0.0, max_scale=10.0),
+            2: MockFusionInput("Center", "Center", "Point", is_passive=False),
+            3: MockFusionInput("_HiddenInternal", "Hidden", "Number", is_passive=False),
+            4: MockFusionInput("PassiveInput", "Passive Input", "Number", is_passive=True),
+            5: MockFusionInput("ProcessMode", "Process Mode", "Number", is_passive=False),
+        }
+
+        inputs = get_tool_animatable_inputs(tool)
+        input_ids = [inp["id"] for inp in inputs]
+
+        # BlurSize and Point X/Y should be present
+        self.assertIn("BlurSize", input_ids)
+        self.assertIn("Center_X", input_ids)
+        self.assertIn("Center_Y", input_ids)
+
+        # Internal and passive inputs should be filtered out
+        self.assertNotIn("_HiddenInternal", input_ids)
+        self.assertNotIn("PassiveInput", input_ids)
+        self.assertNotIn("ProcessMode", input_ids)
+
+    def test_compute_default_range_for_input(self):
+        tool = MockFusionTool("Blur1", "Blur")
+        tool.SetInput("BlurSize", 2.0)
+
+        inp_info = {
+            "tool": tool,
+            "id": "BlurSize",
+            "base_id": "BlurSize",
+            "is_point": False,
+            "min_scale": 0.0,
+            "max_scale": 10.0,
+        }
+        min_v, max_v = compute_default_range_for_input(inp_info)
+        self.assertAlmostEqual(min_v, 2.0)
+        self.assertAlmostEqual(max_v, 3.0)
+
+        # Point range test
+        point_info = {
+            "tool": tool,
+            "id": "Center_X",
+            "base_id": "Center",
+            "is_point": True,
+            "point_axis": "X",
+        }
+        min_p, max_p = compute_default_range_for_input(point_info)
+        self.assertAlmostEqual(min_p, 0.5)
+        self.assertAlmostEqual(max_p, 0.55)
+
+    def test_inject_keyframes_preset_and_custom(self):
+        comp = MockFusionComp()
+        comp.tools["MediaIn1"] = MockFusionTool("MediaIn1", "MediaIn")
+        comp.tools["MediaOut1"] = MockFusionTool("MediaOut1", "MediaOut")
+        # Add a custom effect node
+        custom_node = MockFusionTool("DirectionalBlur1", "DirectionalBlur")
+        custom_node.inputs["BlurSize"] = MockFusionInput("BlurSize", "Blur Size", "Number")
+        comp.tools["DirectionalBlur1"] = custom_node
+
+        video_item = MockTimelineItem(comp)
+
+        # 1. Preset Injection
+        node_name, count = inject_keyframes_to_fusion_comp(
+            video_item, "Blur: BlurSize (Sfocatura)", [0.1, 0.5, 1.2], start_comp_frame=10
+        )
+        self.assertEqual(node_name, "AudioEnvelope_Blur")
+        self.assertEqual(count, 3)
+        blur_tool = comp.FindTool("AudioEnvelope_Blur")
+        self.assertIsNotNone(blur_tool)
+        self.assertEqual(blur_tool.input_values["BlurSize"][10.0], 0.1)
+        self.assertEqual(blur_tool.input_values["BlurSize"][11.0], 0.5)
+        self.assertEqual(blur_tool.input_values["BlurSize"][12.0], 1.2)
+
+        # 2. Custom Clip Effect Injection
+        custom_spec = {
+            "mode": "custom",
+            "inp_info": {
+                "tool_name": "DirectionalBlur1",
+                "id": "BlurSize",
+                "base_id": "BlurSize",
+                "is_point": False,
+                "point_axis": None,
+            },
+        }
+        node_name_custom, count_custom = inject_keyframes_to_fusion_comp(
+            video_item, custom_spec, [0.2, 0.8], start_comp_frame=0
+        )
+        self.assertEqual(node_name_custom, "DirectionalBlur1")
+        self.assertEqual(count_custom, 2)
+        self.assertEqual(custom_node.input_values["BlurSize"][0.0], 0.2)
+        self.assertEqual(custom_node.input_values["BlurSize"][1.0], 0.8)
+
+    def test_inject_keyframes_point_coordinate(self):
+        comp = MockFusionComp()
+        comp.tools["MediaIn1"] = MockFusionTool("MediaIn1", "MediaIn")
+        comp.tools["MediaOut1"] = MockFusionTool("MediaOut1", "MediaOut")
+        transform_node = MockFusionTool("Transform1", "Transform")
+        transform_node.inputs["Center"] = MockFusionInput("Center", "Center", "Point")
+        comp.tools["Transform1"] = transform_node
+
+        video_item = MockTimelineItem(comp)
+
+        # Inject into Center (X axis)
+        point_spec = {
+            "mode": "custom",
+            "inp_info": {
+                "tool_name": "Transform1",
+                "id": "Center_X",
+                "base_id": "Center",
+                "is_point": True,
+                "point_axis": "X",
+            },
+        }
+        node_name, count = inject_keyframes_to_fusion_comp(
+            video_item, point_spec, [0.52, 0.58], start_comp_frame=5
+        )
+        self.assertEqual(node_name, "Transform1")
+        self.assertEqual(count, 2)
+        self.assertEqual(transform_node.input_values["Center"][5.0], [0.52, 0.5])
+        self.assertEqual(transform_node.input_values["Center"][6.0], [0.58, 0.5])
+
+
+
+# ==============================================================================
+# MOCKS FOR UNIT TESTING
+# ==============================================================================
+
+class MockFusionInput:
+    def __init__(self, inps_id, name, data_type, is_passive=False, min_scale=None, max_scale=None, default=None):
+        self.attrs = {
+            "INPS_ID": inps_id,
+            "INPS_Name": name,
+            "INPS_DataType": data_type,
+            "INPB_Passive": is_passive,
+            "INPN_MinScale": min_scale,
+            "INPN_MaxScale": max_scale,
+            "INPN_Default": default,
+        }
+        self.connected_output = None
+
+    def GetAttrs(self, attr_name=None):
+        if attr_name:
+            return self.attrs.get(attr_name)
+        return self.attrs
+
+    def GetConnectedOutput(self):
+        return self.connected_output
+
+
+class MockFusionTool:
+    def __init__(self, name, reg_id):
+        self.attrs = {"TOOLS_Name": name, "TOOLS_RegID": reg_id}
+        self.inputs = {}
+        self.input_values = {}
+        self.connected_inputs = {}
+        self.Input = MockFusionInput("Input", "Input", "Image")
+
+    def GetAttrs(self, attr_name=None):
+        if attr_name:
+            return self.attrs.get(attr_name)
+        return self.attrs
+
+    def SetAttrs(self, d):
+        self.attrs.update(d)
+
+    def GetInputList(self):
+        return self.inputs
+
+    def ConnectInput(self, name, target):
+        self.connected_inputs[name] = target
+        if name in self.inputs:
+            self.inputs[name].connected_output = target
+
+    def SetInput(self, name, val, frame=0):
+        if name not in self.input_values:
+            self.input_values[name] = {}
+        self.input_values[name][frame] = val
+
+    def GetInput(self, name, frame=0):
+        if name in self.input_values and frame in self.input_values[name]:
+            return self.input_values[name][frame]
+        return 0.0
+
+
+class MockFusionComp:
+    def __init__(self):
+        self.tools = {}
+        self.locked = False
+
+    def GetToolList(self, selected=False):
+        return {i + 1: t for i, t in enumerate(self.tools.values())}
+
+    def FindTool(self, name):
+        for t in self.tools.values():
+            if t.GetAttrs("TOOLS_Name") == name:
+                return t
+        return self.tools.get(name)
+
+    def AddTool(self, tool_type):
+        name = f"{tool_type}1"
+        tool = MockFusionTool(name, tool_type)
+        self.tools[name] = tool
+        return tool
+
+    def Lock(self):
+        self.locked = True
+
+    def Unlock(self):
+        self.locked = False
+
+    def BezierSpline(self):
+        return MockFusionTool("Spline", "BezierSpline")
+
+    def XYPath(self):
+        return MockFusionTool("XYPath", "XYPath")
+
+
+class MockTimelineItem:
+    def __init__(self, comp):
+        self.comp = comp
+
+    def GetFusionCompByIndex(self, idx):
+        return self.comp
+
+    def AddFusionComp(self):
+        return self.comp
+
 
 if __name__ == "__main__":
     unittest.main()
